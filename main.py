@@ -1,14 +1,20 @@
 import matplotlib.pyplot as plt
 import torch
 import torch.nn as nn
+import numpy.random as random
 from tqdm import tqdm
 from torch.optim import Adam
 from torchvision.datasets import MNIST
 from torchvision.transforms import Compose, ToTensor, Normalize, Lambda
-from torch.utils.data import DataLoader
+from torch.utils.data import TensorDataset, DataLoader
+
+from utils.prepare_data import prepare_data
+
+# Set seed for reproducibility
+random.seed(42)
 
 
-def MNIST_loaders(train_batch_size=50000, test_batch_size=10000):
+def MNIST_loaders(train_batch_size=30000, test_batch_size=5000):
 
     transform = Compose([
         ToTensor(),
@@ -29,6 +35,19 @@ def MNIST_loaders(train_batch_size=50000, test_batch_size=10000):
 
     return train_loader, test_loader
 
+def WISDM_loaders(file_path, train_batch_size=30000, test_batch_size=5000):
+    x_train, y_train_hot, x_test, y_test_hot = prepare_data(file_path, 20, 10, scaler_type='minmax')
+
+    # Create a TensorDataset
+    dataset_train = TensorDataset(x_train, y_train_hot)
+    dataset_test = TensorDataset(x_test, y_test_hot)
+
+    # Create a DataLoader
+    train_loader = DataLoader(dataset_train, batch_size=train_batch_size, shuffle=True)
+    test_loader = DataLoader(dataset_test, batch_size=test_batch_size, shuffle=True)
+
+    return train_loader, test_loader
+
 
 def overlay_y_on_x(x, y):
     """Replace the first 10 pixels of data [x] with one-hot-encoded label [y]
@@ -36,6 +55,29 @@ def overlay_y_on_x(x, y):
     x_ = x.clone()
     x_[:, :10] *= 0.0
     x_[range(x.shape[0]), y] = x.max()
+    return x_
+
+
+def make_positive_data(x, y):
+    # Use y to create the new tensor to append in front of x
+    y_append = y.view(y.shape[0], 2, 3)
+    x_ = torch.cat((x, y_append), dim=1)
+    return x_
+
+
+def make_negative_data(x, y):
+    # Use y to create the new tensor to append in front of x, but this time with 1 on the wrong spot
+    y_append = torch.zeros(size=(y.shape[0], 6))
+    for i in range(y.shape[0]):
+        skip_int = (y[i] == 1.).nonzero().item()
+        allowed_ints = [j for j in range(6) if j != skip_int]
+        replace_one = random.choice(allowed_ints)
+        y_append[i][replace_one] = 1
+    y_append = y_append.view(y_append.shape[0], 2, 3)
+    # Move the tensor to the GPU
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    y_append = y_append.to(device)
+    x_ = torch.cat((x, y_append), dim=1)
     return x_
 
 
@@ -76,7 +118,9 @@ class Layer(nn.Linear):
         self.num_epochs = 1000
 
     def forward(self, x):
+        # Normalize the previous activation
         x_direction = x / (x.norm(2, 1, keepdim=True) + 1e-4)
+        print("x_direction shape: ", x_direction.shape)
         return self.relu(
             torch.mm(x_direction, self.weight.T) +
             self.bias.unsqueeze(0))
@@ -108,17 +152,16 @@ def visualize_sample(data, name='', idx=0):
     
 if __name__ == "__main__":
     torch.manual_seed(1234)
-    train_loader, test_loader = MNIST_loaders()
+    train_loader, test_loader = WISDM_loaders('dataset/WISDM_ar_v1.1_raw.txt')
 
     net = Net([784, 500, 500])
     x, y = next(iter(train_loader))
     x, y = x.cuda(), y.cuda()
-    x_pos = overlay_y_on_x(x, y)
-    rnd = torch.randperm(x.size(0))
-    x_neg = overlay_y_on_x(x, y[rnd])
+    x_pos = make_positive_data(x, y)
+    x_neg = make_negative_data(x, y)
     
-    for data, name in zip([x, x_pos, x_neg], ['orig', 'pos', 'neg']):
-        visualize_sample(data, name)
+    # for data, name in zip([x, x_pos, x_neg], ['orig', 'pos', 'neg']):
+    #     visualize_sample(data, name)
     
     net.train(x_pos, x_neg)
 
